@@ -1,6 +1,8 @@
 .env
 .env.local
-preview.png
+# only ignore the top-level preview.png produced by --dry-run; docs/preview.png
+# is a checked-in sample image used by the README.
+/preview.png
 *.local.plist
 __pycache__/
 *.pyc

@@ -5,7 +5,7 @@ bars to a 296×152 1-bit PNG and pushes it to a [Dot.](https://dot.mindreset.tec
 e-ink device every 10 minutes. It's the e-ink equivalent of a menu-bar usage
 widget — glanceable, always on, and doesn't use a single byte of your quotas.
 
-![preview](preview.png)
+![preview](docs/preview.png)
 
 Each tool shows:
 

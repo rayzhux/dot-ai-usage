@@ -18,17 +18,39 @@ import io
 import json
 import os
 import sys
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from PIL import Image, ImageDraw, ImageFont
 
 # ---------- config ----------
 
 WIDTH, HEIGHT = 296, 152
+X_MARGIN = 6
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        print(f"warning: {name}={raw!r} is not an integer; using default {default}", file=sys.stderr)
+        return default
+
+
+def _resolve_zone(name: str) -> tuple[ZoneInfo, str]:
+    try:
+        return ZoneInfo(name), name
+    except ZoneInfoNotFoundError:
+        print(f"warning: unknown timezone {name!r}; falling back to UTC", file=sys.stderr)
+        return ZoneInfo("UTC"), "UTC"
+
 
 DEVICE_ID = os.environ.get("DOT_DEVICE_ID", "").strip()
 API_KEY = os.environ.get("DOT_API_KEY", "").strip()
@@ -40,13 +62,13 @@ API_URL = (
 
 OPENUSAGE_URL = os.environ.get("OPENUSAGE_URL", "http://localhost:6736/v1/usage")
 OWNER_NAME = os.environ.get("DOT_OWNER_NAME", "").strip()
-TZ_NAME = os.environ.get("DOT_TZ", "UTC").strip() or "UTC"
+TZ, TZ_NAME = _resolve_zone(os.environ.get("DOT_TZ", "UTC").strip() or "UTC")
 # IANA drops friendly abbreviations for most zones now (e.g. Asia/Dubai → "+04"
 # instead of "GST"). Set DOT_TZ_ABBR to override with whatever you want shown.
 TZ_ABBR_OVERRIDE = os.environ.get("DOT_TZ_ABBR", "").strip()
 # How old OpenUsage data can be before we flag it stale (a small dot next to the
 # owner name in the footer). OpenUsage caches for a bit, so 900s is generous.
-STALE_AFTER_SECONDS = int(os.environ.get("DOT_STALE_SECONDS", "900"))
+STALE_AFTER_SECONDS = _env_int("DOT_STALE_SECONDS", 900)
 
 # macOS San Francisco. SFNS is a variable font and Pillow handles the weight
 # axis, so we use one file for both bold and regular. SF is hand-hinted at small
@@ -121,19 +143,27 @@ def fetch_openusage() -> Snapshot:
         codex=ToolQuota("Codex", "", None, None),
         fetched_at=None,
     )
+    req = urllib.request.Request(OPENUSAGE_URL, headers={"User-Agent": "dot-ai-usage/1"})
     try:
-        with urllib.request.urlopen(OPENUSAGE_URL, timeout=5) as resp:
+        with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read())
-    except Exception as e:  # noqa: BLE001
+    except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
         print(f"openusage fetch failed: {e}", file=sys.stderr)
+        return default
+    if not isinstance(data, list):
+        print(f"openusage: unexpected payload shape (expected list, got {type(data).__name__})", file=sys.stderr)
         return default
 
     tools: dict[str, ToolQuota] = {}
     newest_fetched: datetime | None = None
 
     for provider in data:
+        if not isinstance(provider, dict):
+            continue
         pid = provider.get("providerId")
-        name = provider.get("displayName") or pid or "?"
+        if not pid:
+            continue
+        name = provider.get("displayName") or pid
         plan = provider.get("plan") or ""
         session: Quota | None = None
         weekly: Quota | None = None
@@ -228,24 +258,28 @@ def _draw_section(
 ) -> int:
     """Draw one tool block. `bar_x1` is the shared right edge for all bars in
     the image so Session/Weekly/Session/Weekly all have identical lengths."""
-    x_margin = 6
-    draw.text((x_margin, y0), tool.name, font=fonts["title"], fill=0)
+    draw.text((X_MARGIN, y0), tool.name, font=fonts["title"], fill=0)
     pill_y = y0 + (fonts["title"].size - fonts["pill"].size) // 2 - 1
-    _draw_pill(draw, WIDTH - x_margin, pill_y, tool.plan, fonts["pill"])
+    _draw_pill(draw, WIDTH - X_MARGIN, pill_y, tool.plan, fonts["pill"])
     y = y0 + fonts["title"].size + 3
 
     def _row(label: str, q: Quota | None) -> None:
         nonlocal y
         row_h = fonts["label"].size + 7
-        draw.text((x_margin, y + 1), label, font=fonts["label"], fill=0)
+        draw.text((X_MARGIN, y + 1), label, font=fonts["label"], fill=0)
         status = _status_text(q)
         sw = _text_w(draw, status, fonts["status"])
-        draw.text((WIDTH - x_margin - sw, y + 1), status, font=fonts["status"], fill=0)
-        bar_x0 = x_margin + 62
+        draw.text((WIDTH - X_MARGIN - sw, y + 1), status, font=fonts["status"], fill=0)
+        bar_x0 = X_MARGIN + 62
         if bar_x1 - bar_x0 >= 20:
             bar_h = 8
             bar_y = y + (row_h - bar_h) // 2
-            _draw_bar(draw, bar_x0, bar_y, bar_x1 - bar_x0, bar_h, q.percent_left if q else 0.0)
+            # None quota → draw an empty outlined bar (no fill, no stipple) to
+            # signal "no data" distinctly from "0% left".
+            if q is None:
+                draw.rectangle((bar_x0, bar_y, bar_x1, bar_y + bar_h), outline=0, width=1)
+            else:
+                _draw_bar(draw, bar_x0, bar_y, bar_x1 - bar_x0, bar_h, q.percent_left)
         y += row_h
 
     _row("Session", tool.session)
@@ -267,36 +301,34 @@ def render_png(snap: Snapshot) -> bytes:
 
     # Compute a single bar_x1 shared by all 4 rows so every progress bar has
     # the same length regardless of how wide its status text is.
-    x_margin = 6
     max_sw = max(
         _text_w(draw, _status_text(q), fonts["status"])
         for q in (snap.claude.session, snap.claude.weekly, snap.codex.session, snap.codex.weekly)
     )
-    bar_x1 = WIDTH - x_margin - max_sw - 8
+    bar_x1 = WIDTH - X_MARGIN - max_sw - 8
 
     y = 2
     y = _draw_section(draw, y, snap.claude, fonts, bar_x1)
     y += 2
-    draw.line((x_margin, y, WIDTH - x_margin, y), fill=0, width=1)
+    draw.line((X_MARGIN, y, WIDTH - X_MARGIN, y), fill=0, width=1)
     y += 4
     _draw_section(draw, y, snap.codex, fonts, bar_x1)
 
     # footer: owner name (optional) bottom-left, local-time stamp bottom-right.
     # If openusage data is stale, draw a filled dot next to the owner name so
     # you can tell the upstream daemon froze without reading the log.
-    x_margin = 6
     foot_y = HEIGHT - fonts["meta"].size - 2
-    now_local = datetime.now(ZoneInfo(TZ_NAME))
+    now_local = datetime.now(TZ)
     tz_abbr = TZ_ABBR_OVERRIDE or now_local.strftime("%Z") or TZ_NAME
     stamp = f"Updated {now_local.strftime('%H:%M')} {tz_abbr}".rstrip()
     sw = _text_w(draw, stamp, fonts["meta"])
-    draw.text((WIDTH - x_margin - sw, foot_y), stamp, font=fonts["meta"], fill=0)
+    draw.text((WIDTH - X_MARGIN - sw, foot_y), stamp, font=fonts["meta"], fill=0)
 
     stale = (
         snap.fetched_at is None
         or (datetime.now(timezone.utc) - snap.fetched_at) > timedelta(seconds=STALE_AFTER_SECONDS)
     )
-    x_cursor = x_margin
+    x_cursor = X_MARGIN
     if stale:
         r = 2
         cy = foot_y + fonts["meta"].size // 2 + 1
@@ -346,7 +378,12 @@ def post_image(png_bytes: bytes) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description=(
+            "Render live Claude Code + Codex quotas to a 296x152 1-bit PNG "
+            "and push it to a Dot. e-ink device."
+        ),
+    )
     ap.add_argument(
         "--dry-run",
         action="store_true",
