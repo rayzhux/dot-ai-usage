@@ -9,7 +9,7 @@ INSTALLED="$HOME/Library/LaunchAgents/$LABEL.plist"
 UID_NUM="$(id -u)"
 
 if launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1; then
-  launchctl bootout "gui/$UID_NUM/$LABEL"
+  launchctl bootout "gui/$UID_NUM/$LABEL" || true
   echo "✔ launchd agent $LABEL stopped"
 else
   echo "  (launchd agent $LABEL was not loaded)"

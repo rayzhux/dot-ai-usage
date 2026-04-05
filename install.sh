@@ -35,6 +35,17 @@ if [ ! -f "$PROJECT_DIR/.env" ]; then
   exit 1
 fi
 
+# Reject CRLF line endings in .env — sourcing them assigns values with a
+# trailing \r and quietly corrupts the API key, causing 401s that are hard
+# to diagnose from the log alone.
+if LC_ALL=C grep -q $'\r' "$PROJECT_DIR/.env"; then
+  echo "install.sh: $PROJECT_DIR/.env has CRLF line endings." >&2
+  echo "  Fix with: tr -d '\\r' < .env > .env.unix && mv .env.unix .env" >&2
+  exit 1
+fi
+
+chmod 600 "$PROJECT_DIR/.env"
+
 # shellcheck disable=SC1091
 . "$PROJECT_DIR/.env"
 
@@ -49,25 +60,21 @@ DOT_INTERVAL_SECONDS="${DOT_INTERVAL_SECONDS:-600}"
 
 mkdir -p "$(dirname "$INSTALLED")" "$(dirname "$LOG")"
 
-# Use envsubst if available (ships with gettext via `brew install gettext`),
-# otherwise fall back to a sed pipeline on the specific vars we expand.
-if command -v envsubst >/dev/null 2>&1; then
-  export UV_BIN PROJECT_DIR DOT_DEVICE_ID DOT_API_KEY DOT_OWNER_NAME DOT_TZ DOT_TZ_ABBR DOT_INTERVAL_SECONDS HOME
-  envsubst '${UV_BIN} ${PROJECT_DIR} ${DOT_DEVICE_ID} ${DOT_API_KEY} ${DOT_OWNER_NAME} ${DOT_TZ} ${DOT_TZ_ABBR} ${DOT_INTERVAL_SECONDS} ${HOME}' \
-    < "$TEMPLATE" > "$INSTALLED"
-else
-  sed \
-    -e "s#\${UV_BIN}#$UV_BIN#g" \
-    -e "s#\${PROJECT_DIR}#$PROJECT_DIR#g" \
-    -e "s#\${DOT_DEVICE_ID}#$DOT_DEVICE_ID#g" \
-    -e "s#\${DOT_API_KEY}#$DOT_API_KEY#g" \
-    -e "s#\${DOT_OWNER_NAME}#$DOT_OWNER_NAME#g" \
-    -e "s#\${DOT_TZ}#$DOT_TZ#g" \
-    -e "s#\${DOT_TZ_ABBR}#$DOT_TZ_ABBR#g" \
-    -e "s#\${DOT_INTERVAL_SECONDS}#$DOT_INTERVAL_SECONDS#g" \
-    -e "s#\${HOME}#$HOME#g" \
-    "$TEMPLATE" > "$INSTALLED"
-fi
+# Render the template via Python's string.Template. Values are XML-escaped
+# before substitution so that &, <, > in secrets or names can't produce
+# invalid plist XML. string.Template also fails loudly on unknown ${…}
+# tokens (catches typos in the template).
+UV_BIN="$UV_BIN" PROJECT_DIR="$PROJECT_DIR" \
+  DOT_DEVICE_ID="$DOT_DEVICE_ID" DOT_API_KEY="$DOT_API_KEY" \
+  DOT_OWNER_NAME="$DOT_OWNER_NAME" DOT_TZ="$DOT_TZ" DOT_TZ_ABBR="$DOT_TZ_ABBR" \
+  DOT_INTERVAL_SECONDS="$DOT_INTERVAL_SECONDS" HOME="$HOME" \
+  python3 -c '
+import os, string, sys
+from xml.sax.saxutils import escape
+env = {k: escape(v) for k, v in os.environ.items()}
+with open(sys.argv[1]) as f:
+    sys.stdout.write(string.Template(f.read()).substitute(env))
+' "$TEMPLATE" > "$INSTALLED"
 
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "$INSTALLED" >/dev/null

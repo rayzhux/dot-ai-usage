@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --script
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11"
 # dependencies = ["pillow>=10"]
 # ///
 """Render Claude Code + Codex quota bars to a 296x152 1-bit PNG and push it to
@@ -44,38 +44,31 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _resolve_zone(name: str) -> tuple[ZoneInfo, str]:
+def _resolve_zone(name: str) -> ZoneInfo:
     try:
-        return ZoneInfo(name), name
+        return ZoneInfo(name)
     except ZoneInfoNotFoundError:
         print(f"warning: unknown timezone {name!r}; falling back to UTC", file=sys.stderr)
-        return ZoneInfo("UTC"), "UTC"
+        return ZoneInfo("UTC")
 
 
 DEVICE_ID = os.environ.get("DOT_DEVICE_ID", "").strip()
 API_KEY = os.environ.get("DOT_API_KEY", "").strip()
-API_URL = (
-    f"https://dot.mindreset.tech/api/authV2/open/device/{DEVICE_ID}/image"
-    if DEVICE_ID
-    else ""
-)
 
 OPENUSAGE_URL = os.environ.get("OPENUSAGE_URL", "http://localhost:6736/v1/usage")
 OWNER_NAME = os.environ.get("DOT_OWNER_NAME", "").strip()
-TZ, TZ_NAME = _resolve_zone(os.environ.get("DOT_TZ", "UTC").strip() or "UTC")
-# IANA drops friendly abbreviations for most zones now (e.g. Asia/Dubai → "+04"
-# instead of "GST"). Set DOT_TZ_ABBR to override with whatever you want shown.
+TZ = _resolve_zone(os.environ.get("DOT_TZ", "UTC").strip() or "UTC")
+# IANA drops friendly abbreviations for most zones (e.g. Asia/Dubai → "+04"
+# instead of "GST"). Set DOT_TZ_ABBR to override with what you want shown.
 TZ_ABBR_OVERRIDE = os.environ.get("DOT_TZ_ABBR", "").strip()
-# How old OpenUsage data can be before we flag it stale (a small dot next to the
-# owner name in the footer). OpenUsage caches for a bit, so 900s is generous.
+# How old OpenUsage data can be before we flag it stale (a small dot next to
+# the owner name in the footer). OpenUsage caches for a bit, so 900s is fine.
 STALE_AFTER_SECONDS = _env_int("DOT_STALE_SECONDS", 900)
 
-# macOS San Francisco. SFNS is a variable font and Pillow handles the weight
-# axis, so we use one file for both bold and regular. SF is hand-hinted at small
-# sizes and thresholds cleanly to 1-bit. Tried pixel fonts (Silkscreen, Pixel
-# Operator) first — at 8/16 px the hierarchy pairing is too extreme and the
-# all-caps glyphs fight the dashboard aesthetic. SF at 20/13/11/10 px keeps the
-# modern sans look from the reference mock and reads crisp on the panel.
+# macOS San Francisco. SFNS is a variable font so Pillow uses one file for
+# both bold and regular; it's hand-hinted at small sizes and thresholds
+# cleanly to 1-bit at 20/13/11/10 px. Override with DOT_FONT_* if you want
+# a different look.
 FONT_BOLD_PATH = os.environ.get("DOT_FONT_BOLD", "/System/Library/Fonts/SFNS.ttf")
 FONT_REG_PATH = os.environ.get("DOT_FONT_REG", "/System/Library/Fonts/SFNS.ttf")
 _FALLBACK_FONT = "/System/Library/Fonts/Helvetica.ttc"
@@ -90,9 +83,8 @@ class Quota:
     resets_at: datetime        # tz-aware
 
     def reset_label(self) -> str:
-        delta = self.resets_at - datetime.now(timezone.utc)
-        secs = int(delta.total_seconds())
-        if secs <= 0:
+        secs = int((self.resets_at - datetime.now(timezone.utc)).total_seconds())
+        if secs < 60:
             return "now"
         days, rem = divmod(secs, 86_400)
         hours, rem = divmod(rem, 3_600)
@@ -178,9 +170,11 @@ def fetch_openusage() -> Snapshot:
                 continue
             percent_left = max(0.0, 100.0 - (100.0 * used / limit))
             try:
-                resets_at = datetime.fromisoformat(resets_iso.replace("Z", "+00:00"))
+                resets_at = datetime.fromisoformat(resets_iso)
             except ValueError:
                 continue
+            if resets_at.tzinfo is None:
+                resets_at = resets_at.replace(tzinfo=timezone.utc)
             q = Quota(percent_left=percent_left, resets_at=resets_at)
             if label == "session" and session is None:
                 session = q
@@ -191,11 +185,13 @@ def fetch_openusage() -> Snapshot:
         fetched_iso = provider.get("fetchedAt")
         if fetched_iso:
             try:
-                fetched = datetime.fromisoformat(fetched_iso.replace("Z", "+00:00"))
-                if newest_fetched is None or fetched > newest_fetched:
-                    newest_fetched = fetched
+                fetched = datetime.fromisoformat(fetched_iso)
             except ValueError:
-                pass
+                continue
+            if fetched.tzinfo is None:
+                fetched = fetched.replace(tzinfo=timezone.utc)
+            if newest_fetched is None or fetched > newest_fetched:
+                newest_fetched = fetched
 
     claude = tools.get("claude") or ToolQuota("Claude", "", None, None)
     codex = tools.get("codex") or ToolQuota("Codex", "", None, None)
@@ -233,8 +229,15 @@ def _draw_pill(draw: ImageDraw.ImageDraw, right_x: int, y: int, text: str, font)
     return x0
 
 
-def _draw_bar(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int, pct_left: float) -> None:
+def _draw_bar(
+    draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int, pct_left: float | None
+) -> None:
+    """Draw a progress bar. `pct_left=None` draws just the outline (no fill,
+    no stipple) as a distinct "no data" state — different from 0% left which
+    shows a fully stippled interior."""
     draw.rectangle((x, y, x + w, y + h), outline=0, width=1)
+    if pct_left is None:
+        return
     inner_w = w - 2
     fill_w = int(round(inner_w * max(0.0, min(100.0, pct_left)) / 100.0))
     if fill_w > 0:
@@ -247,6 +250,35 @@ def _draw_bar(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int, pct_lef
 
 def _status_text(q: Quota | None) -> str:
     return "--" if q is None else f"{int(round(q.percent_left))}%  {q.reset_label()}"
+
+
+# Left gutter reserved for the Session/Weekly label column; bars start here.
+LABEL_COL_W = 62
+
+
+def _draw_row(
+    draw: ImageDraw.ImageDraw,
+    y: int,
+    label: str,
+    q: Quota | None,
+    fonts: dict,
+    bar_x1: int,
+) -> int:
+    row_h = fonts["label"].size + 7
+    draw.text((X_MARGIN, y + 1), label, font=fonts["label"], fill=0)
+    draw.text(
+        (WIDTH - X_MARGIN, y + 1),
+        _status_text(q),
+        font=fonts["status"],
+        fill=0,
+        anchor="ra",
+    )
+    bar_x0 = X_MARGIN + LABEL_COL_W
+    if bar_x1 - bar_x0 >= 20:
+        bar_h = 8
+        bar_y = y + (row_h - bar_h) // 2
+        _draw_bar(draw, bar_x0, bar_y, bar_x1 - bar_x0, bar_h, q.percent_left if q else None)
+    return y + row_h
 
 
 def _draw_section(
@@ -262,28 +294,8 @@ def _draw_section(
     pill_y = y0 + (fonts["title"].size - fonts["pill"].size) // 2 - 1
     _draw_pill(draw, WIDTH - X_MARGIN, pill_y, tool.plan, fonts["pill"])
     y = y0 + fonts["title"].size + 3
-
-    def _row(label: str, q: Quota | None) -> None:
-        nonlocal y
-        row_h = fonts["label"].size + 7
-        draw.text((X_MARGIN, y + 1), label, font=fonts["label"], fill=0)
-        status = _status_text(q)
-        sw = _text_w(draw, status, fonts["status"])
-        draw.text((WIDTH - X_MARGIN - sw, y + 1), status, font=fonts["status"], fill=0)
-        bar_x0 = X_MARGIN + 62
-        if bar_x1 - bar_x0 >= 20:
-            bar_h = 8
-            bar_y = y + (row_h - bar_h) // 2
-            # None quota → draw an empty outlined bar (no fill, no stipple) to
-            # signal "no data" distinctly from "0% left".
-            if q is None:
-                draw.rectangle((bar_x0, bar_y, bar_x1, bar_y + bar_h), outline=0, width=1)
-            else:
-                _draw_bar(draw, bar_x0, bar_y, bar_x1 - bar_x0, bar_h, q.percent_left)
-        y += row_h
-
-    _row("Session", tool.session)
-    _row("Weekly", tool.weekly)
+    y = _draw_row(draw, y, "Session", tool.session, fonts, bar_x1)
+    y = _draw_row(draw, y, "Weekly", tool.weekly, fonts, bar_x1)
     return y
 
 
@@ -319,10 +331,9 @@ def render_png(snap: Snapshot) -> bytes:
     # you can tell the upstream daemon froze without reading the log.
     foot_y = HEIGHT - fonts["meta"].size - 2
     now_local = datetime.now(TZ)
-    tz_abbr = TZ_ABBR_OVERRIDE or now_local.strftime("%Z") or TZ_NAME
+    tz_abbr = TZ_ABBR_OVERRIDE or now_local.strftime("%Z")
     stamp = f"Updated {now_local.strftime('%H:%M')} {tz_abbr}".rstrip()
-    sw = _text_w(draw, stamp, fonts["meta"])
-    draw.text((WIDTH - X_MARGIN - sw, foot_y), stamp, font=fonts["meta"], fill=0)
+    draw.text((WIDTH - X_MARGIN, foot_y), stamp, font=fonts["meta"], fill=0, anchor="ra")
 
     stale = (
         snap.fetched_at is None
@@ -350,6 +361,7 @@ def post_image(png_bytes: bytes) -> None:
         raise RuntimeError("DOT_API_KEY is not set")
     if not DEVICE_ID:
         raise RuntimeError("DOT_DEVICE_ID is not set")
+    url = f"https://dot.mindreset.tech/api/authV2/open/device/{DEVICE_ID}/image"
     body = json.dumps(
         {
             "image": base64.b64encode(png_bytes).decode("ascii"),
@@ -359,7 +371,7 @@ def post_image(png_bytes: bytes) -> None:
         }
     ).encode("utf-8")
     req = urllib.request.Request(
-        API_URL,
+        url,
         data=body,
         method="POST",
         headers={
@@ -369,7 +381,7 @@ def post_image(png_bytes: bytes) -> None:
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         print(
-            f"[{datetime.now().isoformat(timespec='seconds')}] dot.app POST {resp.status}",
+            f"[{datetime.now(TZ).isoformat(timespec='seconds')}] dot.app POST {resp.status}",
             flush=True,
         )
 
