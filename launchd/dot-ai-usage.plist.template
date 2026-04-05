@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>sh.rayzhux.dot-ai-usage</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>${UV_BIN}</string>
+    <string>run</string>
+    <string>--script</string>
+    <string>${PROJECT_DIR}/dot_eink.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>${PROJECT_DIR}</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>DOT_DEVICE_ID</key>
+    <string>${DOT_DEVICE_ID}</string>
+    <key>DOT_API_KEY</key>
+    <string>${DOT_API_KEY}</string>
+    <key>DOT_OWNER_NAME</key>
+    <string>${DOT_OWNER_NAME}</string>
+    <key>DOT_TZ</key>
+    <string>${DOT_TZ}</string>
+    <key>DOT_TZ_ABBR</key>
+    <string>${DOT_TZ_ABBR}</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>${DOT_INTERVAL_SECONDS}</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>${HOME}/Library/Logs/dot-ai-usage.log</string>
+  <key>StandardErrorPath</key>
+  <string>${HOME}/Library/Logs/dot-ai-usage.log</string>
+</dict>
+</plist>
