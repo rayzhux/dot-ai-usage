@@ -30,6 +30,8 @@
     <string>${DOT_TZ}</string>
     <key>DOT_TZ_ABBR</key>
     <string>${DOT_TZ_ABBR}</string>
+    <key>DOT_STALE_SECONDS</key>
+    <string>${DOT_STALE_SECONDS}</string>
   </dict>
 
   <key>StartInterval</key>

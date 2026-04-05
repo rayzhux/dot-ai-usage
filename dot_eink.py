@@ -160,13 +160,18 @@ def fetch_openusage() -> Snapshot:
         session: Quota | None = None
         weekly: Quota | None = None
         for line in provider.get("lines", []):
+            if not isinstance(line, dict):
+                continue
             if line.get("type") != "progress":
                 continue
             label = (line.get("label") or "").lower()
-            used = float(line.get("used") or 0.0)
-            limit = float(line.get("limit") or 100.0)
+            try:
+                used = float(line.get("used") or 0.0)
+                limit = float(line.get("limit") or 100.0)
+            except (TypeError, ValueError):
+                continue
             resets_iso = line.get("resetsAt")
-            if not resets_iso or limit <= 0:
+            if not resets_iso or limit <= 0 or not isinstance(resets_iso, str):
                 continue
             percent_left = max(0.0, 100.0 - (100.0 * used / limit))
             try:
